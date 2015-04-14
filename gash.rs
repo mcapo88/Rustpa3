@@ -27,10 +27,10 @@ const ZERO_BUFF: [u8; BUFF_SIZE]=[0;BUFF_SIZE];
 
 const START_PACKET: Packet = Packet{payload:ZERO_BUFF, length: 0, end_of_stream: false};
 const END_PACKET: Packet = Packet{payload:ZERO_BUFF, length: 0, end_of_stream: true};
-struct Packet {
+pub struct Packet {
 	payload: [u8; BUFF_SIZE],
 	length: usize,
-	end_of_stream: bool
+	pub end_of_stream: bool
 }
 
 struct Command_Parse {
@@ -77,7 +77,7 @@ impl Command_Parse {
 }
 
 impl Packet {
-	fn to_string(&self) -> Cow<str>{
+	pub fn to_string(&self) -> Cow<str>{
 		if(self.length<BUFF_SIZE){
 			return String::from_utf8_lossy(&self.payload[0..self.length]);
 
@@ -94,13 +94,13 @@ impl Packet {
 	}
 }
 
-struct Shell<'a> {
+pub struct Shell<'a> {
     cmd_prompt: &'a str,
 		history: Rc<RefCell<Vec<String>>>
 }
 
 impl <'a>Shell<'a> {
-    fn new(prompt_str: &'a str) -> Shell<'a> {
+    pub fn new(prompt_str: &'a str) -> Shell<'a> {
         Shell { cmd_prompt: prompt_str, history: Rc::new(RefCell::new(Vec::new()))}
     }
 
@@ -155,8 +155,8 @@ impl <'a>Shell<'a> {
 		}
 		
 
-		
-    fn run_cmdline(&self, line: &str) {
+    //return Receiver<Packet> which contains results of command	
+    pub fn run_cmdline(&self, line: &str)-> Receiver<Packet>{
 			
 			self.add_to_history(line.to_string());
 			let command = Command_Parse::new(line);
@@ -186,25 +186,7 @@ impl <'a>Shell<'a> {
 					//possibly due to some dereferencing issue when put into a vector
 					last_out=out;
 				}
-				//everything runs in the background except for the printer/writer threads. So the only difference in background process
-			if command.background_flag {						
-					if(command.output_file.is_empty()){
-						Thread::spawn(move|| {
-							Shell::print_results(last_out);
-						});
-					} else {
-						let f_name=command.output_file.clone();
-						Thread::spawn(move|| {
-							Shell::write_results(last_out, f_name);
-						});
-					}						
-			}else { 
-				if(command.output_file.is_empty()){
-					Shell::print_results(last_out);
-				} else {
-					Shell::write_results(last_out, command.output_file);
-				}	
-			}
+				return last_out;
 		}
     fn run_cmd(&self, program: &str, line: &str, s_in: Receiver<Packet>, s_out: Sender<Packet>) {
 				let program_p = program.to_string().clone();
@@ -369,7 +351,7 @@ fn get_cmdline_from_args() -> Option<String> {
 fn main() {
     let opt_cmd_line = get_cmdline_from_args();
     match opt_cmd_line {
-        Some(cmd_line) => Shell::new("").run_cmdline(cmd_line.as_slice()),
+        Some(cmd_line) => {let r: Receiver<Packet> = Shell::new("").run_cmdline(cmd_line.as_slice());},
         None           => Shell::new("gash > ").run(),
     }
 }

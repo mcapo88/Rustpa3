@@ -28,6 +28,7 @@
 #[macro_use]
 extern crate log;
 extern crate libc;
+mod gash;  //this is for using gash.rs
 
 use std::io::*;
 use std::old_io::File;
@@ -38,7 +39,7 @@ use std::borrow::ToOwned;
 use std::thread::Thread;
 use std::old_io::fs::PathExtensions;
 use std::old_io::{Acceptor, Listener};
-
+use std::old_io::BufferedReader;
 extern crate getopts;
 use getopts::{optopt, getopts};
 
@@ -62,7 +63,6 @@ static COUNTER_STYLE : &'static str = "<doctype !html><html><head><title>Hello, 
              </style></head>
              <body>";
 
-static mut visitor_count : usize = 0;
 
 struct HTTP_Request {
     // Use peer_name as the key to access TcpStream in hashmap. 
@@ -121,16 +121,20 @@ impl WebServer {
             let mut acceptor = listener.listen().unwrap();
             println!("{} listening on {} (serving from: {}).", 
                      SERVER_NAME, addr, www_dir_path_str.as_str().unwrap());
+            let mut visits = 0; //initialize visitor count as 0
             for stream_raw in acceptor.incoming() {
+                visits += 1; //increment visits by 1 for every incoming request
+                let count = Arc::new(visits); //make Arc holding current num visitors
                 let (queue_tx, queue_rx) = channel();
                 queue_tx.send(request_queue_arc.clone());
                 
                 let notify_chan = notify_tx.clone();
                 let stream_map_arc = stream_map_arc.clone();
-                
+                let count_child = count.clone();  //clone arc to be used in thread
                 // Spawn a task to handle the connection.
                 Thread::spawn(move|| {
-                	unsafe { visitor_count += 1; } // TODO: Fix unsafe counter
+                	let local_count = &count_child; //now local value from arc in thread
+                	println!("visitor count is {}", local_count);
                     let request_queue_arc = queue_rx.recv().unwrap();
                     let mut stream = match stream_raw {
                         Ok(s) => {s}
@@ -160,7 +164,8 @@ impl WebServer {
                              
                         if path_str.as_slice().eq("./")  {
                             debug!("===== Counter Page request =====");
-                            WebServer::respond_with_counter_page(stream);
+                            //send count of visitors to method with counter page
+                            WebServer::respond_with_counter_page(stream, local_count);
                             debug!("=====Terminated connection from [{}].=====", peer_name);
                         }  else if !path_obj.exists() || path_obj.is_dir() {
                             debug!("===== Error page request =====");
@@ -188,12 +193,12 @@ impl WebServer {
     }
 
     // TODO: Safe visitor counter.
-    fn respond_with_counter_page(stream: std::old_io::net::tcp::TcpStream) {
+    fn respond_with_counter_page(stream: std::old_io::net::tcp::TcpStream, local_count: &Arc<usize>) {
         let mut stream = stream;
         let response: String = 
             format!("{}{}<h1>Greetings, Krusty!</h1><h2>Visitor count: {}</h2></body></html>\r\n", 
                     HTTP_OK, COUNTER_STYLE, 
-                    unsafe { visitor_count } );
+                    local_count);
         debug!("Responding to counter request");
         stream.write(response.as_bytes());
     }
@@ -210,7 +215,39 @@ impl WebServer {
     // TODO: Server-side gashing.
     fn respond_with_dynamic_page(stream: std::old_io::net::tcp::TcpStream, path: &Path) {
       // for now, just serve as static file
-      WebServer::respond_with_static_file(stream, path);
+      //WebServer::respond_with_static_file(stream, path);
+      let mut file = BufferedReader::new(File::open(path));
+      for line in file.lines(){
+        let l = line.unwrap();
+        let l_str: String = l.to_string();
+        let l_split = l_str.split_str("<!--#exec");
+        let l_vec = l_split.collect::<Vec<&str>>();
+        if l_vec.len() > 1 {
+            //println!("shell command");
+            let middle = l_vec[1];
+            let mid_split = middle.split_str("-->");
+            let mid_vec = mid_split.collect::<Vec<&str>>();
+            let in_quotes = mid_vec[0];
+            let openq_split = in_quotes.split_str("\"");
+            let openq_vec = openq_split.collect::<Vec<&str>>();
+            //println!("{}", openq_vec[1]);
+            //cmd for gash is in openq_vec[1]
+            let command = openq_vec[1];
+            //code below prints out results of Shell's running of embedded command
+            let cmd_result: Receiver<gash::Packet> = gash::Shell::new("").run_cmdline(command);
+            loop{
+				let test: gash::Packet = match cmd_result.recv(){
+					Err(why) => {break;},
+					Ok(res) => {res},
+				};
+				print!("{}", test.to_string());
+				if test.end_of_stream {
+					break;
+				}
+			}
+            
+        }
+      }
     }
     
     // TODO: Smarter Scheduling.
