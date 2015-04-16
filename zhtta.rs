@@ -1,4 +1,4 @@
-//
+//Andy Alexander, Mark Capobianco
 // zhtta.rs
 //
 // Starting code for PA3
@@ -134,7 +134,7 @@ impl WebServer {
                 // Spawn a task to handle the connection.
                 Thread::spawn(move|| {
                 	let local_count = &count_child; //now local value from arc in thread
-                	println!("visitor count is {}", local_count);
+                	//println!("visitor count is {}", local_count);
                     let request_queue_arc = queue_rx.recv().unwrap();
                     let mut stream = match stream_raw {
                         Ok(s) => {s}
@@ -216,14 +216,20 @@ impl WebServer {
     fn respond_with_dynamic_page(stream: std::old_io::net::tcp::TcpStream, path: &Path) {
       // for now, just serve as static file
       //WebServer::respond_with_static_file(stream, path);
+      let mut stream = stream;
+      let response = HTTP_OK;
+      //let mut resp: &str = "";
+      //let resp_str: String = ("").to_string();
       let mut file = BufferedReader::new(File::open(path));
+      stream.write(response.as_bytes());  //start the stream with HTTP_OK
       for line in file.lines(){
         let l = line.unwrap();
         let l_str: String = l.to_string();
         let l_split = l_str.split_str("<!--#exec");
         let l_vec = l_split.collect::<Vec<&str>>();
-        if l_vec.len() > 1 {
+        if l_vec.len() > 1 {  //if there was an embedded shell command
             //println!("shell command");
+            stream.write(l_vec[0].as_bytes());
             let middle = l_vec[1];
             let mid_split = middle.split_str("-->");
             let mid_vec = mid_split.collect::<Vec<&str>>();
@@ -239,13 +245,17 @@ impl WebServer {
 				let test: gash::Packet = match cmd_result.recv(){
 					Err(why) => {break;},
 					Ok(res) => {res},
-				};
-				print!("{}", test.to_string());
-				if test.end_of_stream {
-					break;
-				}
-			}
-            
+		        };
+		        stream.write(test.to_string().as_bytes());
+		        if test.end_of_stream {
+			        break;
+		        }
+		    }
+		    if l_vec.len() > 2 { //if there was more AFTER the embedded shell command
+		        stream.write(l_vec[2].as_bytes());
+		    }  
+        } else {  //if there was no embedded shell command, just write line
+            stream.write(l.as_bytes());
         }
       }
     }
