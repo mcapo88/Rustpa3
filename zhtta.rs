@@ -112,7 +112,7 @@ impl WebServer {
     fn listen(&mut self) {
     	let addr = String::from_str(format!("{}:{}", self.ip, self.port).as_slice());
         let www_dir_path_str = self.www_dir_path.clone();
-        let request_queue_arc = self.request_queue_arc.clone();
+        let request_queue_arc = self.request_queue_arc.clone(); //tasks to schedule- want it to be a priority queue if static file, put in request queue and handles it single-threadedly
         let notify_tx = self.notify_tx.clone();
         let stream_map_arc = self.stream_map_arc.clone();
 
@@ -192,7 +192,7 @@ impl WebServer {
 		stream.write(msg.as_bytes());
     }
 
-    // TODO: Safe visitor counter.
+    // Safe visitor counter.
     fn respond_with_counter_page(stream: std::old_io::net::tcp::TcpStream, local_count: &Arc<usize>) {
         let mut stream = stream;
         let response: String = 
@@ -212,7 +212,7 @@ impl WebServer {
         stream.write(file_reader.read_to_end().unwrap().as_slice());
     }
     
-    // TODO: Server-side gashing.
+    //Server-side gashing.
     fn respond_with_dynamic_page(stream: std::old_io::net::tcp::TcpStream, path: &Path) {
       // for now, just serve as static file
       //WebServer::respond_with_static_file(stream, path);
