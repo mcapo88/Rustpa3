@@ -110,12 +110,13 @@ impl WebServer {
     }
     
     fn listen(&mut self) {
+       
     	let addr = String::from_str(format!("{}:{}", self.ip, self.port).as_slice());
         let www_dir_path_str = self.www_dir_path.clone();
         let request_queue_arc = self.request_queue_arc.clone(); //tasks to schedule- want it to be a priority queue if static file, put in request queue and handles it single-threadedly
         let notify_tx = self.notify_tx.clone();
         let stream_map_arc = self.stream_map_arc.clone();
-
+        
         Thread::spawn(move|| {
         	let listener = std::old_io::TcpListener::bind(addr.as_slice()).unwrap();
             let mut acceptor = listener.listen().unwrap();
@@ -124,16 +125,14 @@ impl WebServer {
             let mut visits = 0; //initialize visitor count as 0
             for stream_raw in acceptor.incoming() {
                 visits += 1; //increment visits by 1 for every incoming request
-                let count = Arc::new(visits); //make Arc holding current num visitors
+                let count = visits; //make Arc holding current num visitors
                 let (queue_tx, queue_rx) = channel();
                 queue_tx.send(request_queue_arc.clone());
                 
                 let notify_chan = notify_tx.clone();
                 let stream_map_arc = stream_map_arc.clone();
-                let count_child = count.clone();  //clone arc to be used in thread
                 // Spawn a task to handle the connection.
                 Thread::spawn(move|| {
-                	let local_count = &count_child; //now local value from arc in thread
                 	//println!("visitor count is {}", local_count);
                     let request_queue_arc = queue_rx.recv().unwrap();
                     let mut stream = match stream_raw {
@@ -161,11 +160,12 @@ impl WebServer {
                        
                         debug!("Requested path: [{}]", path_obj.as_str().expect("error"));
                         debug!("Requested path: [{}]", path_str);
+                        //maybe spawn new threads here to deal with each request
                              
                         if path_str.as_slice().eq("./")  {
                             debug!("===== Counter Page request =====");
                             //send count of visitors to method with counter page
-                            WebServer::respond_with_counter_page(stream, local_count);
+                            WebServer::respond_with_counter_page(stream, count);
                             debug!("=====Terminated connection from [{}].=====", peer_name);
                         }  else if !path_obj.exists() || path_obj.is_dir() {
                             debug!("===== Error page request =====");
@@ -193,7 +193,7 @@ impl WebServer {
     }
 
     // Safe visitor counter.
-    fn respond_with_counter_page(stream: std::old_io::net::tcp::TcpStream, local_count: &Arc<usize>) {
+    fn respond_with_counter_page(stream: std::old_io::net::tcp::TcpStream, local_count: usize) {
         let mut stream = stream;
         let response: String = 
             format!("{}{}<h1>Greetings, Krusty!</h1><h2>Visitor count: {}</h2></body></html>\r\n", 
@@ -303,7 +303,9 @@ impl WebServer {
         let stream_map_get = self.stream_map_arc.clone();
         // Receiver<> cannot be sent to another task. So we have to make this task as the main task that can access self.notify_rx.
         let (request_tx, request_rx) = channel();
-        loop {
+        let mut thread_count = Arc::new(Mutex::new(0)); //count how many threads are running for tasks
+        loop 
+        {
             self.notify_rx.recv();    // waiting for new request enqueued.
             {   // make sure we request the lock inside a block with different scope, so that we give it back at the end of that block
                 let mut req_queue = req_queue_get.lock().unwrap();
@@ -326,13 +328,37 @@ impl WebServer {
                 stream_tx.send(stream);
             }
             // TODO: Spawning more tasks to respond the dequeued requests concurrently. You may need a semophore to control the concurrency.
+            //println!("num running threads {}", thread_count);
+            
+            
+            let tc = thread_count.clone(); //make a clone of the arc that can be used w/in ea. thread
+            let mut count = *(tc.lock().unwrap());
+        
+            while count >= 10 {
+                count = *(tc.lock().unwrap());
+                //println!("count is {}", count);
+            }
+            
+            Thread::spawn(move || {
+            {
+                let mut c =tc.lock().unwrap();  //lock the count so it can be incremented
+                *c += 1;
+                println!("threads running is {}", *c);
+            }
             let stream = match stream_rx.recv(){
                 Ok(s) => s,
                 Err(e) => panic!("There was an error while receiving from the stream channel! {}", e),
             };
+            //println!("threads running is {}", thread_count);
             WebServer::respond_with_static_file(stream, &request.path);
             // Close stream automatically.
             debug!("=====Terminated connection from [{}].=====", request.peer_name);
+            {
+                let mut d = tc.lock().unwrap(); //lock the count so it can be decremented
+                *d -= 1;
+                println!("threads running is {}", *d);
+            }
+            });
         }
     }
     
