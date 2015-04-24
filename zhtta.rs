@@ -46,6 +46,9 @@ use getopts::{optopt, getopts};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Sender, Receiver};
 use std::sync::mpsc::channel;
+use std::collections::BinaryHeap; //will be used to make priority queue
+use std::cmp::Ordering;
+const thread_limit: usize = 10; //alter the num of threads that can be made for tasks easily here
 
 static SERVER_NAME : &'static str = "Zhtta Version 1.0";
 
@@ -71,14 +74,48 @@ struct HTTP_Request {
     //  See issue: https://github.com/mozilla/rust/issues/12139)
     peer_name: String,
     path: Path,
+    size: u64,
 }
+//need to make it a min heap
+impl PartialEq for HTTP_Request {
+    fn eq(&self, other: &Self) -> bool{
+        other.size == self.size
+    }
+}
+impl Eq for HTTP_Request {}
+impl PartialOrd for HTTP_Request {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        other.size.partial_cmp(&self.size)
+    }
+}
+impl Ord for HTTP_Request {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.size.cmp(&self.size)
+    }
+}
+/*struct PriorityQ {
+    heap: BinaryHeap<HTTP_REQUEST>,
+}
+
+impl PriorityQ {
+    fn new() -> PriorityQ {
+        let heap = BinaryHeap::<HTTP_REQUEST>::new();
+        PriorityQ{
+            heap: heap,
+        }
+    }
+    fn push(nextReq: HTTP_REQUEST) {
+        
+    }
+    
+}*/
 
 struct WebServer {
     ip: String,
     port: usize,
     www_dir_path: Path,
     
-    request_queue_arc: Arc<Mutex<Vec<HTTP_Request>>>,
+    request_queue_arc: Arc<Mutex<BinaryHeap<HTTP_Request>>>,
     stream_map_arc: Arc<Mutex<HashMap<String, std::old_io::net::tcp::TcpStream>>>,
     
     notify_rx: Receiver<()>,
@@ -96,7 +133,7 @@ impl WebServer {
             port: port,
             www_dir_path: www_dir_path,
                         
-            request_queue_arc: Arc::new(Mutex::new(Vec::new())),
+            request_queue_arc: Arc::new(Mutex::new(BinaryHeap::new())),
             stream_map_arc: Arc::new(Mutex::new(HashMap::new())),
             
             notify_rx: notify_rx,
@@ -261,7 +298,7 @@ impl WebServer {
     }
     
     // TODO: Smarter Scheduling.
-    fn enqueue_static_file_request(stream: std::old_io::net::tcp::TcpStream, path_obj: &Path, stream_map_arc: Arc<Mutex<HashMap<String, std::old_io::net::tcp::TcpStream>>>, req_queue_arc: Arc<Mutex<Vec<HTTP_Request>>>, notify_chan: Sender<()>) {
+    fn enqueue_static_file_request(stream: std::old_io::net::tcp::TcpStream, path_obj: &Path, stream_map_arc: Arc<Mutex<HashMap<String, std::old_io::net::tcp::TcpStream>>>, req_queue_arc: Arc<Mutex<BinaryHeap<HTTP_Request>>>, notify_chan: Sender<()>) {
     	// Save stream in hashmap for later response.
         let mut stream = stream;
         let peer_name = WebServer::get_peer_name(&mut stream);
@@ -279,7 +316,8 @@ impl WebServer {
 
         // Enqueue the HTTP request.
         // TOCHECK: it was ~path_obj.clone(), make sure in which order are ~ and clone() executed
-        let req = HTTP_Request { peer_name: peer_name.clone(), path: path_obj.clone() };
+        let size = path_obj.stat().unwrap().size;
+        let req = HTTP_Request { peer_name: peer_name.clone(), path: path_obj.clone(), size: size };
         let (req_tx, req_rx) = channel();
         req_tx.send(req);
         debug!("Waiting for queue mutex lock.");
@@ -304,61 +342,82 @@ impl WebServer {
         // Receiver<> cannot be sent to another task. So we have to make this task as the main task that can access self.notify_rx.
         let (request_tx, request_rx) = channel();
         let mut thread_count = Arc::new(Mutex::new(0)); //count how many threads are running for tasks
+        let mut counter = 0;
         loop 
-        {
+        { 
+            
             self.notify_rx.recv();    // waiting for new request enqueued.
             {   // make sure we request the lock inside a block with different scope, so that we give it back at the end of that block
                 let mut req_queue = req_queue_get.lock().unwrap();
                 if req_queue.len() > 0 {
-                    let req = req_queue.remove(0);
+                    let req = req_queue.pop();
                     debug!("A new request dequeued, now the length of queue is {}.", req_queue.len());
                     request_tx.send(req);
                 }
             }
 
             let request = match request_rx.recv(){
-                Ok(s) => s,
+                Ok(s) => s.unwrap(),
                 Err(e) => panic!("There was an error while receiving from the request channel! {}", e),
             };
             // Get stream from hashmap.
             let (stream_tx, stream_rx) = channel();
             {   // make sure we request the lock inside a block with different scope, so that we give it back at the end of that block
                 let mut stream_map = stream_map_get.lock().unwrap();
-                let stream = stream_map.remove(&request.peer_name).expect("no option tcpstream");
+                let r2 = &request.peer_name;
+                let stream = stream_map.remove(r2).expect("no option tcpstream");
                 stream_tx.send(stream);
             }
             // TODO: Spawning more tasks to respond the dequeued requests concurrently. You may need a semophore to control the concurrency.
-            //println!("num running threads {}", thread_count);
             
+            //let tcount = thread_count.clone();
+            //let mut count = tcount.lock().unwrap();
+            //println!("times thru loop: {}", loopct);
+            //println!("counter is {}", counter);
             
-            let tc = thread_count.clone(); //make a clone of the arc that can be used w/in ea. thread
-            let mut count = *(tc.lock().unwrap());
-        
-            while count >= 10 {
-                count = *(tc.lock().unwrap());
-                //println!("count is {}", count);
-            }
-            
-            Thread::spawn(move || {
+            //check the count of currently running threads
             {
-                let mut c =tc.lock().unwrap();  //lock the count so it can be incremented
-                *c += 1;
-                println!("threads running is {}", *c);
+            counter = *(thread_count.lock().unwrap());
+                println!("init {} - {}", counter, thread_limit);
             }
-            let stream = match stream_rx.recv(){
-                Ok(s) => s,
-                Err(e) => panic!("There was an error while receiving from the stream channel! {}", e),
-            };
-            //println!("threads running is {}", thread_count);
-            WebServer::respond_with_static_file(stream, &request.path);
-            // Close stream automatically.
-            debug!("=====Terminated connection from [{}].=====", request.peer_name);
+            //if count is greater than or equal to limit, busy wait
+            while counter >= thread_limit {
+                {
+                //within busy wait, check the counter periodically
+                counter = *(thread_count.lock().unwrap());
+                 //println!("waiting {} - {}", counter, thread_limit);
+                }
+                //sleep me so it's not constantly checking the counter
+            }
+            
             {
-                let mut d = tc.lock().unwrap(); //lock the count so it can be decremented
-                *d -= 1;
-                println!("threads running is {}", *d);
+                {
+                    let mut c =thread_count.lock().unwrap();  //lock the count so it can be incremented
+                    *c += 1;
+                    println!("INC: threads running is {}", *c);
+                }
+                let tc = thread_count.clone();
+                Thread::spawn(move || {
+                
+                let stream = match stream_rx.recv(){
+                    Ok(s) => s,
+                    Err(e) => panic!("There was an error while receiving from the stream channel! {}", e),
+                };
+                //println!("threads running is {}", thread_count);
+                let r = &request.path;
+                WebServer::respond_with_static_file(stream, r);
+                // Close stream automatically.
+                debug!("=====Terminated connection from [{:?}].=====", r);
+                {
+                    let mut d = tc.lock().unwrap(); //lock the count so it can be decremented
+                    *d -= 1;
+                    println!("DEC: threads running is {}", *d);
+                }
+                
+                });
             }
-            });
+
+           
         }
     }
     
