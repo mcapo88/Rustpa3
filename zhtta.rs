@@ -48,7 +48,11 @@ use std::sync::mpsc::{Sender, Receiver};
 use std::sync::mpsc::channel;
 use std::collections::BinaryHeap; //will be used to make priority queue
 use std::cmp::Ordering;
-const thread_limit: usize = 10; //alter the num of threads that can be made for tasks easily here
+use std::old_io::Timer;  //timer will be used to make busy-waiting more efficient (less frequent checks of count of threads running)
+use std::time::Duration;
+
+const thread_limit: usize = 30; //alter the num of threads that can be made for tasks easily here
+
 
 static SERVER_NAME : &'static str = "Zhtta Version 1.0";
 
@@ -93,22 +97,6 @@ impl Ord for HTTP_Request {
         other.size.cmp(&self.size)
     }
 }
-/*struct PriorityQ {
-    heap: BinaryHeap<HTTP_REQUEST>,
-}
-
-impl PriorityQ {
-    fn new() -> PriorityQ {
-        let heap = BinaryHeap::<HTTP_REQUEST>::new();
-        PriorityQ{
-            heap: heap,
-        }
-    }
-    fn push(nextReq: HTTP_REQUEST) {
-        
-    }
-    
-}*/
 
 struct WebServer {
     ip: String,
@@ -117,6 +105,8 @@ struct WebServer {
     
     request_queue_arc: Arc<Mutex<BinaryHeap<HTTP_Request>>>,
     stream_map_arc: Arc<Mutex<HashMap<String, std::old_io::net::tcp::TcpStream>>>,
+    //make an arc containing a Map to store files- this acts as a cache
+    cached_files_arc: Arc<Mutex<HashMap<String, File>>>,
     
     notify_rx: Receiver<()>,
     notify_tx: Sender<()>,
@@ -135,6 +125,7 @@ impl WebServer {
                         
             request_queue_arc: Arc::new(Mutex::new(BinaryHeap::new())),
             stream_map_arc: Arc::new(Mutex::new(HashMap::new())),
+            cached_files_arc: Arc::new(Mutex::new(HashMap::new())),
             
             notify_rx: notify_rx,
             notify_tx: notify_tx,
@@ -242,11 +233,58 @@ impl WebServer {
     
     // TODO: Streaming file.
     // TODO: Application-layer file caching.
-    fn respond_with_static_file(stream: std::old_io::net::tcp::TcpStream, path: &Path) {
-        let mut stream = stream;
-        let mut file_reader = File::open(path).unwrap();
-        stream.write(HTTP_OK.as_bytes());
-        stream.write(file_reader.read_to_end().unwrap().as_slice());
+    fn respond_with_static_file(stream: std::old_io::net::tcp::TcpStream, path: &Path, cache: Arc<Mutex<HashMap<String, File>>>) {
+        //boolean saying whether file in cache or not
+        let mut was_cached = 0;
+        let mut file_reader: File;
+        //first, get the map that stores all the files in cache, acquire lock, and set boolean indicating whether or not it was in cache
+        {
+            let mut cache_map = cache.lock().unwrap();
+            //path as string is key for cached file
+            let fname = path.as_str().unwrap();
+            //if file is in cache, set was_cached to "true" (1)
+            if cache_map.contains_key(fname) {
+                println!("in cache");
+                was_cached = 1;
+            } 
+        }
+        let fname = path.as_str().unwrap();
+        let f_string = fname.to_string();
+        //if file wasn't in cache, read from disk
+        if was_cached == 0 { 
+            //read from disk
+            println!("NOT in cache");
+            file_reader = File::open(path).unwrap();
+            let mut stream = stream;
+            stream.write(HTTP_OK.as_bytes());
+            stream.write(file_reader.read_to_end().unwrap().as_slice());
+            {
+                //after read from disk, acquire lock and put file in cache
+                let mut cache_map = cache.lock().unwrap();
+                cache_map.insert(f_string, file_reader);
+            }
+        }
+        //file was in cache- read it out of the cache
+        else{ 
+            let fname = path.as_str().unwrap();
+            //acquire lock to read file out of cache
+            {
+                let mut cache_map = cache.lock().unwrap();
+                //use .remove() b/co that returns option with File - originally tried using .get() but that returned &File which created issues with trying to use "borrowed" value
+                let mut file_reader_option = cache_map.remove(fname);
+                file_reader = file_reader_option.unwrap();
+            }
+            //release lock and write file to stream
+            let mut stream = stream;
+            stream.write(HTTP_OK.as_bytes());
+            stream.write(file_reader.read_to_end().unwrap().as_slice());
+            //acquire lock to put file back in cache
+            {
+                let mut cache_map = cache.lock().unwrap();
+                cache_map.insert(f_string, file_reader);
+            }
+        }
+        
     }
     
     //Server-side gashing.
@@ -343,6 +381,7 @@ impl WebServer {
         let (request_tx, request_rx) = channel();
         let mut thread_count = Arc::new(Mutex::new(0)); //count how many threads are running for tasks
         let mut counter = 0;
+        let mut timer = Timer::new().unwrap();
         loop 
         { 
             
@@ -381,6 +420,7 @@ impl WebServer {
                 println!("init {} - {}", counter, thread_limit);
             }
             //if count is greater than or equal to limit, busy wait
+            
             while counter >= thread_limit {
                 {
                 //within busy wait, check the counter periodically
@@ -388,8 +428,9 @@ impl WebServer {
                  //println!("waiting {} - {}", counter, thread_limit);
                 }
                 //sleep me so it's not constantly checking the counter
+                timer.sleep(Duration::milliseconds(10)); 
             }
-            
+            let cache = self.cached_files_arc.clone();
             {
                 {
                     let mut c =thread_count.lock().unwrap();  //lock the count so it can be incremented
@@ -398,14 +439,14 @@ impl WebServer {
                 }
                 let tc = thread_count.clone();
                 Thread::spawn(move || {
-                
                 let stream = match stream_rx.recv(){
                     Ok(s) => s,
                     Err(e) => panic!("There was an error while receiving from the stream channel! {}", e),
                 };
                 //println!("threads running is {}", thread_count);
                 let r = &request.path;
-                WebServer::respond_with_static_file(stream, r);
+                
+                WebServer::respond_with_static_file(stream, r, cache);
                 // Close stream automatically.
                 debug!("=====Terminated connection from [{:?}].=====", r);
                 {
