@@ -255,10 +255,20 @@ impl WebServer {
             //read from disk
             println!("NOT in cache");
             file_reader = File::open(path).unwrap();
+            let mut reader = BufferedReader::new(file_reader);
             let mut stream = stream;
             stream.write(HTTP_OK.as_bytes());
-            let mut contents = file_reader.read_to_end().unwrap();
-            stream.write(contents.as_slice());
+            
+            let mut contents: Vec<u8>=Vec::new();
+            //for each line in the file, read the bytes into a Vec<u8> one by one, and then use stream to write line by line and then to put the file in the cache, you have a Vec<u8> which contains all the bytes of the file
+            for line in reader.lines().filter_map(|result| result.ok()) {
+                for x in line.as_bytes() { 
+                    contents.push(*x);
+                }
+                let _ = stream.write_all(line.as_bytes());
+            }
+            //stream.write(contents.as_slice());
+            
             {
                 //after read from disk, acquire lock and put file in cache
                 let mut cache_map = cache.lock().unwrap();
@@ -272,23 +282,13 @@ impl WebServer {
             //acquire lock to read file out of cache
             {
                 let mut cache_map = cache.lock().unwrap();
-                //use .remove() b/co that returns option with File - originally tried using .get() but that returned &File which created issues with trying to use "borrowed" value
                 let mut file_reader_option = cache_map.get(fname);
                 let contents = file_reader_option.unwrap();
-                //cache_map.insert(f_string, contents);
                 let mut stream = stream;
                 stream.write(HTTP_OK.as_bytes());
                 stream.write(contents.as_slice());
             }
-            //release lock and write file to stream
-            
-            //acquire lock to put file back in cache
-            //{
-            //    let mut cache_map = cache.lock().unwrap();
-            //    cache_map.insert(f_string, contents);
-            //}
         }
-        
     }
     
     //Server-side gashing.
