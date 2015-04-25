@@ -106,7 +106,7 @@ struct WebServer {
     request_queue_arc: Arc<Mutex<BinaryHeap<HTTP_Request>>>,
     stream_map_arc: Arc<Mutex<HashMap<String, std::old_io::net::tcp::TcpStream>>>,
     //make an arc containing a Map to store files- this acts as a cache
-    cached_files_arc: Arc<Mutex<HashMap<String, File>>>,
+    cached_files_arc: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     
     notify_rx: Receiver<()>,
     notify_tx: Sender<()>,
@@ -233,7 +233,7 @@ impl WebServer {
     
     // TODO: Streaming file.
     // TODO: Application-layer file caching.
-    fn respond_with_static_file(stream: std::old_io::net::tcp::TcpStream, path: &Path, cache: Arc<Mutex<HashMap<String, File>>>) {
+    fn respond_with_static_file(stream: std::old_io::net::tcp::TcpStream, path: &Path, cache: Arc<Mutex<HashMap<String, Vec<u8>>>>) {
         //boolean saying whether file in cache or not
         let mut was_cached = 0;
         let mut file_reader: File;
@@ -257,32 +257,36 @@ impl WebServer {
             file_reader = File::open(path).unwrap();
             let mut stream = stream;
             stream.write(HTTP_OK.as_bytes());
-            stream.write(file_reader.read_to_end().unwrap().as_slice());
+            let mut contents = file_reader.read_to_end().unwrap();
+            stream.write(contents.as_slice());
             {
                 //after read from disk, acquire lock and put file in cache
                 let mut cache_map = cache.lock().unwrap();
-                cache_map.insert(f_string, file_reader);
+                cache_map.insert(f_string, contents);
             }
         }
         //file was in cache- read it out of the cache
         else{ 
             let fname = path.as_str().unwrap();
+            println!("read from cache");
             //acquire lock to read file out of cache
             {
                 let mut cache_map = cache.lock().unwrap();
                 //use .remove() b/co that returns option with File - originally tried using .get() but that returned &File which created issues with trying to use "borrowed" value
-                let mut file_reader_option = cache_map.remove(fname);
-                file_reader = file_reader_option.unwrap();
+                let mut file_reader_option = cache_map.get(fname);
+                let contents = file_reader_option.unwrap();
+                //cache_map.insert(f_string, contents);
+                let mut stream = stream;
+                stream.write(HTTP_OK.as_bytes());
+                stream.write(contents.as_slice());
             }
             //release lock and write file to stream
-            let mut stream = stream;
-            stream.write(HTTP_OK.as_bytes());
-            stream.write(file_reader.read_to_end().unwrap().as_slice());
+            
             //acquire lock to put file back in cache
-            {
-                let mut cache_map = cache.lock().unwrap();
-                cache_map.insert(f_string, file_reader);
-            }
+            //{
+            //    let mut cache_map = cache.lock().unwrap();
+            //    cache_map.insert(f_string, contents);
+            //}
         }
         
     }
